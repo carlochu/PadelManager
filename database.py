@@ -1,12 +1,24 @@
 import sqlite3
 import os
 
-# Nombre del archivo local que guardará todos los datos
-DB_NAME = "padel_datos.db"
+# 1. Buscamos la carpeta personal del usuario de Windows (ej. C:\Users\NombreMadre)
+carpeta_usuario = os.path.expanduser("~")
+
+# 2. Creamos una carpeta oculta o dedicada para los datos de la app
+carpeta_app = os.path.join(carpeta_usuario, "PadelManager_Datos")
+
+# 3. CRÍTICO: Obligamos a Windows a crear la carpeta si no existe ANTES de conectar SQLite
+if not os.path.exists(carpeta_app):
+    os.makedirs(carpeta_app)
+
+# 4. Asignamos la ruta final
+DB_NAME = os.path.join(carpeta_app, "padel_datos.db")
 
 def conectar():
     """Establece la conexión con la base de datos SQLite."""
     return sqlite3.connect(DB_NAME)
+    
+# ... (El resto de tus funciones inicializar_db, agregar_jugadora, etc. siguen igual debajo)
 
 def inicializar_db():
     """Crea la estructura de tablas la primera vez que se abre la app."""

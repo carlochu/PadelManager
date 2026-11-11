@@ -304,11 +304,9 @@ class PadelApp(ctk.CTk):
             texto = f"📅 {j['fecha']}  |  🏆 {j['nombre_liga']}"
             ctk.CTkLabel(frame_fila, text=texto, font=("Arial", 14, "bold")).pack(side="left", padx=15, pady=10)
             
-            ctk.CTkButton(frame_fila, text="Borrar", fg_color="red", hover_color="darkred", width=70,
-                          command=lambda f=j['fecha'], l=j['id_liga']: self.evento_eliminar_jornada(f, l)).pack(side="right", padx=5)
+            ctk.CTkButton(frame_fila, text="Borrar", fg_color="red", hover_color="darkred", width=70, command=lambda f=j['fecha'], l=j['id_liga']: self.evento_eliminar_jornada(f, l)).pack(side="right", padx=5)
             
-            ctk.CTkButton(frame_fila, text="Editar", width=70,
-                          command=lambda f=j['fecha'], l=j['id_liga']: self.abrir_ventana_edicion(f, l, nueva=False)).pack(side="right", padx=5)
+            ctk.CTkButton(frame_fila, text="Editar", width=70, command=lambda f=j['fecha'], l=j['id_liga']: self.abrir_ventana_edicion(f, l, nueva=False)).pack(side="right", padx=5)
 
     def evento_eliminar_jornada(self, fecha, id_liga):
         respuesta = messagebox.askyesno("Confirmar", f"¿Borrar todos los datos de la jornada del {fecha}?")
@@ -392,5 +390,7 @@ class PadelApp(ctk.CTk):
         ctk.CTkButton(ventana, text="Guardar Cambios", fg_color="green", hover_color="darkgreen", command=guardar_cambios).pack(pady=10)
 
 if __name__ == "__main__":
+    # CRÍTICO: Si el archivo no existe, lo crea con sus tablas antes de arrancar la interfaz
+    db.inicializar_db() 
     app = PadelApp()
     app.mainloop()
