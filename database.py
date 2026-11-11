@@ -1,208 +1,361 @@
 import sqlite3
 import os
 
-# 1. Buscamos la carpeta personal del usuario de Windows (ej. C:\Users\NombreMadre)
 carpeta_usuario = os.path.expanduser("~")
-
-# 2. Creamos una carpeta oculta o dedicada para los datos de la app
 carpeta_app = os.path.join(carpeta_usuario, "PadelManager_Datos")
-
-# 3. CRÍTICO: Obligamos a Windows a crear la carpeta si no existe ANTES de conectar SQLite
 if not os.path.exists(carpeta_app):
     os.makedirs(carpeta_app)
-
-# 4. Asignamos la ruta final
 DB_NAME = os.path.join(carpeta_app, "padel_datos.db")
 
 def conectar():
-    """Establece la conexión con la base de datos SQLite."""
     return sqlite3.connect(DB_NAME)
-    
-# ... (El resto de tus funciones inicializar_db, agregar_jugadora, etc. siguen igual debajo)
 
 def inicializar_db():
-    """Crea la estructura de tablas la primera vez que se abre la app."""
     conexion = conectar()
     cursor = conexion.cursor()
-
-    # 1. Tabla de Jugadoras
+    
+    # Tabla limpia sin puntos manuales
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS jugadoras (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nombre TEXT NOT NULL,
-            posicion TEXT NOT NULL -- Esperamos 'Drive', 'Revés' o 'Comodín'
+            nombre TEXT UNIQUE NOT NULL,
+            posicion TEXT NOT NULL
         )
     ''')
-
-    # 2. Tabla de Ligas (Bullpadel e Interclubes)
+    
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ligas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nombre TEXT NOT NULL UNIQUE
+        CREATE TABLE IF NOT EXISTS jornadas (
+            fecha TEXT,
+            id_liga INTEGER,
+            rival TEXT DEFAULT '',
+            ganado INTEGER DEFAULT -1,
+            PRIMARY KEY (fecha, id_liga)
         )
     ''')
-
-    # 3. Tabla de Convocatorias (El historial para el algoritmo)
+    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS convocatorias (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
             id_jugadora INTEGER,
+            fecha_jornada TEXT,
             id_liga INTEGER,
-            fecha DATE NOT NULL,
-            estado TEXT NOT NULL, -- Esperamos 'Convocada' o 'Descartada'
-            FOREIGN KEY(id_jugadora) REFERENCES jugadoras(id),
-            FOREIGN KEY(id_liga) REFERENCES ligas(id)
+            estado TEXT,
+            FOREIGN KEY (id_jugadora) REFERENCES jugadoras(id),
+            FOREIGN KEY (fecha_jornada, id_liga) REFERENCES jornadas(fecha, id_liga)
         )
     ''')
-
-    # Insertamos las dos ligas automáticamente si no existen
-    cursor.execute('INSERT OR IGNORE INTO ligas (nombre) VALUES ("Bullpadel"), ("Interclubes")')
-
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS partidos_acta (
+            fecha_jornada TEXT,
+            id_liga INTEGER,
+            num_pareja INTEGER,
+            id_drive INTEGER,
+            id_reves INTEGER,
+            Rivales_nombres TEXT DEFAULT '',
+            s1_nos INTEGER, s1_riv INTEGER,
+            s2_nos INTEGER, s2_riv INTEGER,
+            s3_nos INTEGER, s3_riv INTEGER,
+            ganado INTEGER DEFAULT -1,
+            PRIMARY KEY (fecha_jornada, id_liga, num_pareja),
+            FOREIGN KEY (fecha_jornada, id_liga) REFERENCES jornadas(fecha, id_liga)
+        )
+    ''')
     conexion.commit()
     conexion.close()
-    print("Estructura de la base de datos creada/verificada con éxito.")
 
+# --- FUNCIONES DE JUGADORAS BLINDADAS ---
 
 def agregar_jugadora(nombre, posicion):
-    """Inserta una nueva jugadora en la base de datos."""
+    try:
+        conexion = conectar()
+        cursor = conexion.cursor()
+        cursor.execute("INSERT INTO jugadoras (nombre, posicion) VALUES (?, ?)", (nombre, posicion))
+        conexion.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False 
+    finally:
+        conexion.close()
+
+def modificar_jugadora(id_jugadora, nombre, posicion):
+    try:
+        conexion = conectar()
+        cursor = conexion.cursor()
+        cursor.execute("UPDATE jugadoras SET nombre = ?, posicion = ? WHERE id = ?", (nombre, posicion, id_jugadora))
+        exito = cursor.rowcount > 0
+        conexion.commit()
+        return exito
+    except Exception:
+        return False
+    finally:
+        conexion.close()
+
+def eliminar_jugadora(id_jugadora):
     conexion = conectar()
     cursor = conexion.cursor()
-    # Usamos interrogaciones (?) para evitar inyecciones SQL y errores de sintaxis
-    cursor.execute('INSERT INTO jugadoras (nombre, posicion) VALUES (?, ?)', (nombre, posicion))
+    cursor.execute("DELETE FROM jugadoras WHERE id = ?", (id_jugadora,))
+    cursor.execute("DELETE FROM convocatorias WHERE id_jugadora = ?", (id_jugadora,))
     conexion.commit()
     conexion.close()
 
-def obtener_jugadoras():
-    """Devuelve una lista con todas las jugadoras."""
-    conexion = conectar()
-    # TRUCO: sqlite3.Row permite acceder a las columnas por su nombre (ej. jugadora['nombre'])
-    # en lugar de por índices numéricos. Esto le facilitará mucho la vida al algoritmo luego.
-    conexion.row_factory = sqlite3.Row 
-    cursor = conexion.cursor()
-    cursor.execute('SELECT * FROM jugadoras')
-    
-    # Convertimos los resultados directamente a una lista de diccionarios de Python
-    jugadoras = [dict(row) for row in cursor.fetchall()]
-    conexion.close()
-    return jugadoras
-
-def registrar_convocatoria(id_jugadora, id_liga, fecha, estado):
-    """Guarda si una jugadora ha sido convocada o descartada en una fecha y liga concreta."""
-    conexion = conectar()
-    cursor = conexion.cursor()
-    cursor.execute('''
-        INSERT INTO convocatorias (id_jugadora, id_liga, fecha, estado) 
-        VALUES (?, ?, ?, ?)
-    ''', (id_jugadora, id_liga, fecha, estado))
-    conexion.commit()
-    conexion.close()
-
-def obtener_jornadas_guardadas():
-    """Devuelve la lista de fechas y ligas que ya tienen datos guardados en BD."""
-    conexion = conectar()
-    conexion.row_factory = sqlite3.Row
-    cursor = conexion.cursor()
-    # Agrupamos por fecha y liga para sacar el listado principal
-    cursor.execute('''
-        SELECT DISTINCT c.fecha, c.id_liga, l.nombre as nombre_liga
-        FROM convocatorias c
-        JOIN ligas l ON c.id_liga = l.id
-        ORDER BY c.fecha DESC
-    ''')
-    jornadas = [dict(row) for row in cursor.fetchall()]
-    conexion.close()
-    return jornadas
-
-def obtener_estado_jugadoras_jornada(fecha, id_liga):
-    """Devuelve cómo estaba guardada cada jugadora en un partido concreto."""
-    conexion = conectar()
-    cursor = conexion.cursor()
-    cursor.execute('SELECT id_jugadora, estado FROM convocatorias WHERE fecha = ? AND id_liga = ?', (fecha, id_liga))
-    # Devolvemos un diccionario {id_jugadora: "estado"} para que la interfaz lo lea rapidísimo
-    estados = {row[0]: row[1] for row in cursor.fetchall()}
-    conexion.close()
-    return estados
-
-def eliminar_jornada(fecha, id_liga):
-    """Borra todos los registros de una jornada concreta."""
-    conexion = conectar()
-    cursor = conexion.cursor()
-    cursor.execute('DELETE FROM convocatorias WHERE fecha = ? AND id_liga = ?', (fecha, id_liga))
-    conexion.commit()
-    conexion.close()
+# --- FUNCIONES DE JORNADAS, ACTAS Y ESTADÍSTICAS ---
 
 def existe_jornada(fecha, id_liga):
-    """Comprueba si ya hay datos guardados para esa fecha y liga en concreto."""
     conexion = conectar()
     cursor = conexion.cursor()
-    cursor.execute('SELECT 1 FROM convocatorias WHERE fecha = ? AND id_liga = ? LIMIT 1', (fecha, id_liga))
+    cursor.execute("SELECT 1 FROM jornadas WHERE fecha = ? AND id_liga = ?", (fecha, id_liga))
     existe = cursor.fetchone() is not None
     conexion.close()
     return existe
 
-def modificar_jugadora(id_jugadora, nombre, posicion):
-    """Actualiza los datos de una jugadora existente."""
+def eliminar_jornada(fecha, id_liga):
     conexion = conectar()
     cursor = conexion.cursor()
-    cursor.execute('UPDATE jugadoras SET nombre = ?, posicion = ? WHERE id = ?', (nombre, posicion, id_jugadora))
+    cursor.execute("DELETE FROM partidos_acta WHERE fecha_jornada = ? AND id_liga = ?", (fecha, id_liga))
+    cursor.execute("DELETE FROM convocatorias WHERE fecha_jornada = ? AND id_liga = ?", (fecha, id_liga))
+    cursor.execute("DELETE FROM jornadas WHERE fecha = ? AND id_liga = ?", (fecha, id_liga))
     conexion.commit()
     conexion.close()
 
-def eliminar_jugadora(id_jugadora):
-    """Borra a la jugadora y todo su historial de convocatorias."""
+def registrar_convocatoria(id_jugadora, id_liga, fecha, estado):
     conexion = conectar()
     cursor = conexion.cursor()
-    # 1. Borramos su historial para no dejar datos corruptos
-    cursor.execute('DELETE FROM convocatorias WHERE id_jugadora = ?', (id_jugadora,))
-    # 2. Borramos a la jugadora
-    cursor.execute('DELETE FROM jugadoras WHERE id = ?', (id_jugadora,))
+    cursor.execute("INSERT OR IGNORE INTO jornadas (fecha, id_liga) VALUES (?, ?)", (fecha, id_liga))
+    cursor.execute("INSERT INTO convocatorias (id_jugadora, fecha_jornada, id_liga, estado) VALUES (?, ?, ?, ?)",(id_jugadora, fecha, id_liga, estado))
     conexion.commit()
     conexion.close()
 
-# --- BLOQUE DE PRUEBA ---
-# Este código solo se ejecuta si corremos este archivo directamente.
-if __name__ == "__main__":
-    inicializar_db()
-    
-    # 1. Limpiamos la tabla por si ejecutas el script varias veces (para no duplicar las de prueba)
+def guardar_alineacion_completa(fecha, id_liga, parejas, suplentes):
+    """Guarda de forma atómica la convocatoria y deja pre-creada el acta con las Parejas 1, 2 y 3."""
+    try:
+        conexion = conectar()
+        cursor = conexion.cursor()
+        cursor.execute("INSERT OR IGNORE INTO jornadas (fecha, id_liga, rival, ganado) VALUES (?, ?, '', -1)", (fecha, id_liga))
+        
+        for i, p in enumerate(parejas):
+            num_p = i + 1
+            id_d = p['drive']['id']
+            id_r = p['reves']['id']
+            cursor.execute("INSERT INTO convocatorias (id_jugadora, fecha_jornada, id_liga, estado) VALUES (?, ?, ?, 'Convocada')", (id_d, fecha, id_liga))
+            cursor.execute("INSERT INTO convocatorias (id_jugadora, fecha_jornada, id_liga, estado) VALUES (?, ?, ?, 'Convocada')", (id_r, fecha, id_liga))
+            cursor.execute('''
+                INSERT INTO partidos_acta (fecha_jornada, id_liga, num_pareja, id_drive, id_reves)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (fecha, id_liga, num_p, id_d, id_r))
+            
+        for s in suplentes:
+            cursor.execute("INSERT INTO convocatorias (id_jugadora, fecha_jornada, id_liga, estado) VALUES (?, ?, ?, 'Descartada')", (s['id'], fecha, id_liga))
+            
+        conexion.commit()
+        return True
+    except Exception as e:
+        print("Error guardando alineación:", e)
+        return False
+    finally:
+        conexion.close()
+
+def guardar_acta_encuentro(fecha, id_liga, rival, ganado_encuentro, lista_partidos, ids_descartadas=None):
+    """Guarda el acta completa (sets, parejas, rivales y victoria) y sincroniza las convocatorias."""
+    try:
+        conexion = conectar()
+        cursor = conexion.cursor()
+        
+        cursor.execute('''
+            INSERT INTO jornadas (fecha, id_liga, rival, ganado)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(fecha, id_liga) DO UPDATE SET rival = excluded.rival, ganado = excluded.ganado
+        ''', (fecha, id_liga, rival, ganado_encuentro))
+        
+        cursor.execute("DELETE FROM partidos_acta WHERE fecha_jornada = ? AND id_liga = ?", (fecha, id_liga))
+        
+        ids_titulares = []
+        for p in lista_partidos:
+            ids_titulares.extend([p['id_drive'], p['id_reves']])
+            cursor.execute('''
+                INSERT INTO partidos_acta (
+                    fecha_jornada, id_liga, num_pareja, id_drive, id_reves, Rivales_nombres,
+                    s1_nos, s1_riv, s2_nos, s2_riv, s3_nos, s3_riv, ganado
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                fecha, id_liga, p['num_pareja'], p['id_drive'], p['id_reves'], p.get('rivales_pareja', ''),
+                p['s1_nos'], p['s1_riv'], p['s2_nos'], p['s2_riv'], p['s3_nos'], p['s3_riv'], p['ganado']
+            ))
+            
+        # Sincronizar convocatorias para que las estadísticas de rotación estén siempre al día
+        if ids_descartadas is None:
+            cursor.execute("SELECT id_jugadora FROM convocatorias WHERE fecha_jornada = ? AND id_liga = ? AND estado = 'Descartada'", (fecha, id_liga))
+            ids_descartadas = [r[0] for r in cursor.fetchall() if r[0] not in ids_titulares]
+            
+        cursor.execute("DELETE FROM convocatorias WHERE fecha_jornada = ? AND id_liga = ?", (fecha, id_liga))
+        for id_t in ids_titulares:
+            if id_t:
+                cursor.execute("INSERT INTO convocatorias (id_jugadora, fecha_jornada, id_liga, estado) VALUES (?, ?, ?, 'Convocada')", (id_t, fecha, id_liga))
+        for id_d in ids_descartadas:
+            if id_d and id_d not in ids_titulares:
+                cursor.execute("INSERT INTO convocatorias (id_jugadora, fecha_jornada, id_liga, estado) VALUES (?, ?, ?, 'Descartada')", (id_d, fecha, id_liga))
+                
+        conexion.commit()
+        return True
+    except Exception as e:
+        print("Error guardando acta:", e)
+        return False
+    finally:
+        conexion.close()
+
+def obtener_acta_encuentro(fecha, id_liga):
     conexion = conectar()
-    conexion.execute("DELETE FROM jugadoras") 
-    conexion.execute("DELETE FROM sqlite_sequence WHERE name='jugadoras'") # Resetea el contador de IDs
-    conexion.commit()
+    cursor = conexion.cursor()
+    cursor.execute("SELECT rival, ganado FROM jornadas WHERE fecha = ? AND id_liga = ?", (fecha, id_liga))
+    fila_j = cursor.fetchone()
+    if not fila_j:
+        conexion.close()
+        return None
+        
+    cursor.execute('''
+        SELECT num_pareja, id_drive, id_reves, Rivales_nombres, s1_nos, s1_riv, s2_nos, s2_riv, s3_nos, s3_riv, ganado
+        FROM partidos_acta WHERE fecha_jornada = ? AND id_liga = ? ORDER BY num_pareja ASC
+    ''', (fecha, id_liga))
+    filas_p = cursor.fetchall()
+    
+    partidos = []
+    for fp in filas_p:
+        partidos.append({
+            "num_pareja": fp[0], "id_drive": fp[1], "id_reves": fp[2], "rivales_pareja": fp[3] or "",
+            "s1_nos": fp[4], "s1_riv": fp[5], "s2_nos": fp[6], "s2_riv": fp[7], "s3_nos": fp[8], "s3_riv": fp[9],
+            "ganado": fp[10]
+        })
+        
+    # Si era una jornada antigua sin parejas asignadas todavía, repartimos las 6 convocadas en P1, P2 y P3
+    if not partidos:
+        cursor.execute("SELECT id_jugadora FROM convocatorias WHERE fecha_jornada = ? AND id_liga = ? AND estado = 'Convocada'", (fecha, id_liga))
+        convocadas = [r[0] for r in cursor.fetchall()]
+        for i in range(3):
+            id_d = convocadas[i*2] if len(convocadas) > i*2 else None
+            id_r = convocadas[i*2+1] if len(convocadas) > i*2+1 else None
+            partidos.append({
+                "num_pareja": i+1, "id_drive": id_d, "id_reves": id_r, "rivales_pareja": "",
+                "s1_nos": None, "s1_riv": None, "s2_nos": None, "s2_riv": None, "s3_nos": None, "s3_riv": None,
+                "ganado": -1
+            })
+            
+    cursor.execute("SELECT id_jugadora FROM convocatorias WHERE fecha_jornada = ? AND id_liga = ? AND estado = 'Descartada'", (fecha, id_liga))
+    descartadas = [r[0] for r in cursor.fetchall()]
     conexion.close()
     
-    # 2. Insertamos a las compañeras de tu madre
-    agregar_jugadora("Marta", "Drive")
-    agregar_jugadora("Laura", "Revés")
-    agregar_jugadora("Ana", "Comodín")
-    
-    # 3. Extraemos y mostramos los datos
-    lista_jugadoras = obtener_jugadoras()
-    print("\n--- Lista de Jugadoras en la BD ---")
-    for j in lista_jugadoras:
-        print(f"ID: {j['id']} | Nombre: {j['nombre']} | Posición: {j['posicion']}")
+    return {
+        "rival": fila_j[0] or "",
+        "ganado": fila_j[1] if fila_j[1] is not None else -1,
+        "partidos": partidos,
+        "descartadas": descartadas
+    }
 
-def obtener_estadisticas_jugadoras(id_liga):
-    """Obtiene a todas las jugadoras con sus cálculos de partidos y descartes para una liga."""
+def obtener_jornadas_guardadas():
     conexion = conectar()
-    conexion.row_factory = sqlite3.Row
+    cursor = conexion.cursor()
+    cursor.execute("SELECT fecha, id_liga, rival, ganado FROM jornadas ORDER BY fecha DESC")
+    filas = cursor.fetchall()
+    conexion.close()
+    res = []
+    for f in filas:
+        res.append({
+            "fecha": f[0],
+            "id_liga": f[1],
+            "nombre_liga": "Bullpadel" if f[1] == 1 else "Interclubes",
+            "rival": f[2] if f[2] else "Sin rival asignado",
+            "ganado": f[3] if f[3] is not None else -1
+        })
+    return res
+
+def calcular_puntos_bullpadel_actas(factor_division=0.80):
+    """Calcula los puntos ganados en actas EXCLUSIVAMENTE de Bullpadel (id_liga = 1) para 5ª División (80%)."""
+    conexion = conectar()
     cursor = conexion.cursor()
     
-    # Esta consulta SQL agrupa el historial. 
-    # COALESCE convierte los valores nulos (cuando no tienen historial) en 0.
-    consulta = '''
-        SELECT 
-            j.id, 
-            j.nombre, 
-            j.posicion,
-            COALESCE(SUM(CASE WHEN c.estado = 'Convocada' THEN 1 ELSE 0 END), 0) AS partidos_jugados,
-            MAX(CASE WHEN c.estado = 'Convocada' THEN c.fecha ELSE NULL END) AS ultima_convocatoria,
-            COALESCE(SUM(CASE WHEN c.estado = 'Descartada' THEN 1 ELSE 0 END), 0) AS veces_descartada
-        FROM jugadoras j
-        LEFT JOIN convocatorias c ON j.id = c.id_jugadora AND c.id_liga = ?
-        GROUP BY j.id, j.nombre, j.posicion
-    '''
-    cursor.execute(consulta, (id_liga,))
-    estadisticas = [dict(row) for row in cursor.fetchall()]
+    # Obtenemos todas las jornadas de Bullpadel (id_liga = 1)
+    cursor.execute("SELECT fecha, ganado FROM jornadas WHERE id_liga = 1")
+    jornadas_bp = cursor.fetchall()
+    
+    puntos_acumulados = {}
+    
+    for fecha, ganado_encuentro in jornadas_bp:
+        cursor.execute('''
+            SELECT num_pareja, id_drive, id_reves, s1_nos, s1_riv, s2_nos, s2_riv, s3_nos, s3_riv, ganado
+            FROM partidos_acta WHERE fecha_jornada = ? AND id_liga = 1
+        ''', (fecha,))
+        partidos = cursor.fetchall()
+        
+        for p in partidos:
+            num_p, id_d, id_r, s1n, s1r, s2n, s2r, s3n, s3r, ganado_p = p
+            
+            # Contar cuántos sets se disputaron realmente
+            sets_jugados = 0
+            for sn, sr in [(s1n, s1r), (s2n, s2r), (s3n, s3r)]:
+                if sn is not None and sr is not None and (sn > 0 or sr > 0):
+                    sets_jugados += 1
+                    
+            pts_partido = 0
+            if ganado_p == 1:
+                if num_p == 1:
+                    pts_partido = 1000 if sets_jugados == 2 else 900
+                elif num_p == 2:
+                    pts_partido = 800 if sets_jugados == 2 else 700
+                elif num_p == 3:
+                    pts_partido = 600 if sets_jugados == 2 else 500
+                    
+            # Bonus de +100 puntos a las 6 titulares si el equipo ganó el enfrentamiento
+            bonus_equipo = 100 if ganado_encuentro == 1 else 0
+            pts_totales_jornada = round((pts_partido + bonus_equipo) * factor_division, 1)
+            
+            for id_jug in (id_d, id_r):
+                if id_jug:
+                    puntos_acumulados[id_jug] = puntos_acumulados.get(id_jug, 0.0) + pts_totales_jornada
+                    
+    conexion.close()
+    return puntos_acumulados
+
+def obtener_jugadoras():
+    conexion = conectar()
+    cursor = conexion.cursor()
+    cursor.execute("SELECT id, nombre, posicion FROM jugadoras ORDER BY nombre")
+    filas = cursor.fetchall()
+    conexion.close()
+    
+    pts_actas = calcular_puntos_bullpadel_actas()
+    return [{
+        "id": f[0],
+        "nombre": f[1],
+        "posicion": f[2],
+        "puntos": round(pts_actas.get(f[0], 0.0), 1)
+    } for f in filas]
+
+def obtener_estadisticas_jugadoras(id_liga=None):
+    conexion = conectar()
+    cursor = conexion.cursor()
+    cursor.execute("SELECT id, nombre, posicion FROM jugadoras")
+    jugadoras = cursor.fetchall()
+    
+    pts_actas = calcular_puntos_bullpadel_actas()
+    estadisticas = []
+    
+    for jug in jugadoras:
+        id_j = jug[0]
+        cursor.execute("SELECT COUNT(*) FROM convocatorias WHERE id_jugadora = ? AND estado = 'Convocada'", (id_j,))
+        jugados = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM convocatorias WHERE id_jugadora = ? AND estado = 'Descartada'", (id_j,))
+        descartes = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT MAX(fecha_jornada) FROM convocatorias WHERE id_jugadora = ? AND estado = 'Convocada'", (id_j,))
+        ultima = cursor.fetchone()[0]
+        
+        estadisticas.append({
+            "id": id_j,
+            "nombre": jug[1],
+            "posicion": jug[2],
+            "puntos": round(pts_actas.get(id_j, 0.0), 1),
+            "partidos_jugados": jugados,
+            "veces_descartada": descartes,
+            "ultima_convocatoria": ultima
+        })
     conexion.close()
     return estadisticas
